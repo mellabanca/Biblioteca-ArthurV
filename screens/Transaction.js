@@ -1,9 +1,10 @@
 import React, {Component} from "react";
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ImageBackground } from "react-native";
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ImageBackground, KeyboardAvoidingView, ToastAndroid, Alert } from "react-native";
 import * as Permissions from "expo-permissions";
 import { BarCodeScanner } from "expo-barcode-scanner";
 import {Camera} from "expo-camera";
 import db from "../config";
+import firebase from "firebase";
 
 const bgImage = require("../assets/background2.png");
 const appIcon = require("../assets/appIcon.png");
@@ -18,7 +19,9 @@ export default class TransactionScreen extends Component{
             scanned: false,
             scannedData: "",
             bookId: "",
-            studentId: ""
+            studentId: "",
+            bookName: "",
+            studentName: ""
         }
     }
 
@@ -48,27 +51,176 @@ export default class TransactionScreen extends Component{
         }
       };
 
-    handleTransaction = () => {
-      var {bookId} = this.state;
+    handleTransaction = async () => {
+      var {bookId, studentId} = this.state;
+      await this.getBookDetails(bookId);
+      await this.getStudentDetails(studentId);
+
+      var transactionType = await this.checkBookAvailability(bookId);
+
+      if(!transactionType){
+        this.setState({bookId: "", studentId: ""})
+        Alert.alert("Infelizmente nós ainda não temos esse livro, tente pegar outro.");
+      } else if(transactionType === "issue"){
+        var isEligible = await this.checkStudentForIssue(studentId);
+        if(isEligible){
+          var {bookName, studentName} = this.state;
+          this.initiateBookIssue(bookId, studentId, bookName, studentName);
+        }
+          ToastAndroid.show("Livro entregue para o aluno!", ToastAndroid.SHORT);
+      } else {
+        var isEligible = await this.checkStudentForReturn(studentId, bookId);
+        if(isEligible){
+          var {bookName, studentName} = this.state;
+          this.initiateBookReturn(bookId, studentId, bookName, studentName);
+        }
+          ToastAndroid.show("Livro devolvido a biblioteca da escola!", ToastAndroid.SHORT);
+      }
+    }
+
+    checkStudentForIssue = async studentId => {
+      const studentRef = await db.collection("students")
+                              .where("student_id", "==", studentId)
+                              .get();
+      var isStudentAvailable = "";
+      if(studentRef.docs.length == 0){
+        this.setState({bookId: "", studentId: ""})
+        isStudentAvailable = false;
+        Alert.alert("Esse aluno não está mais na escola.")
+      } else {
+        studentRef.docs.map(doc=>{
+          if(doc.data().number_of_books_issued < 2){
+            isStudentAvailable = true;
+          } else {
+            isStudentAvailable = false;
+            Alert.alert("Você quer ser um professor?");
+            this.setState({bookId: "", studentId: ""})
+          }
+        })
+      }
+      return isStudentAvailable;
+    }
+
+    checkStudentForReturn = async(bookId, studentId) => {
+      const transactionRef = await db.collection("transactions")
+                                     .where("book_id", "==", bookId)
+                                     .limit(1)
+                                     .get();
+      var isStudentAvailable = "";
+      transactionRef.docs.map(doc=>{
+        var lastBookTransaction = doc.data();
+        if(lastBookTransaction.student_id === studentId){
+          isStudentAvailable = true;
+        } else {
+          isStudentAvailable = false;
+          Alert.alert("Me desculpe mas não foi você quem pegou este livro, e a pessoa que pegou pode ainda estar lendo.");
+          this.setState({bookId: "", studentId: ""})
+        }
+      })
+      return isStudentAvailable;
+    }
+
+    initiateBookIssue = async (bookId, studentId, bookName, studentName) => {
+      //adicionar uma transação
+      db.collection("transactions").add({
+        student_id: studentId,
+        student_name: studentName,
+        book_id: bookId,
+        book_name: bookName,
+        date: firebase.firestore.Timestamp.now().toDate(),
+        transaction_type: "issue"
+      });
+      //alterar o status do livro
       db.collection("books")
         .doc(bookId)
+        .update({
+          is_book_available: false
+        });
+      //alterar o número de livros retirados pelo aluno
+      db.collection("students")
+        .doc(studentId)
+        .update({
+          number_of_books_issued: firebase.firestore.FieldValue.increment(1)
+        });
+      //atualizar o estado local
+      this.setState({
+        bookId: "",
+        studentId: ""
+      })
+    }
+
+    initiateBookReturn = async (bookId, studentId, bookName, studentName) => {
+      //adicionar uma transação
+      db.collection("transactions").add({
+        student_id: studentId,
+        student_name: studentName,
+        book_id: bookId,
+        book_name: bookName,
+        date: firebase.firestore.Timestamp.now().toDate(),
+        transaction_type: "return"
+      });
+      //alterar o status do livro
+      db.collection("books")
+        .doc(bookId)
+        .update({
+          is_book_available: true
+        });
+      //alterar o número de livros retirados pelo aluno
+      db.collection("students")
+        .doc(studentId)
+        .update({
+          number_of_books_issued: firebase.firestore.FieldValue.increment(-1)
+        });
+      //atualizar o estado local
+      this.setState({
+        bookId: "",
+        studentId: ""
+      })
+    }
+
+    getBookDetails = bookId => {
+      bookId = bookId.trim();
+      db.collection("books")
+        .where("book_id","==",bookId)
         .get()
-        .then(doc=>{
-          var book = doc.data();
-          if(book.is_book_available){
-            this.initiateBookIssue();
-          } else {
-            this.initiateBookReturn();
-          }
+        .then(snapshot => {
+          snapshot.docs.map(doc => {
+            this.setState({
+              bookName: doc.data().book_name
+            })
+          })
         })
     }
 
-    initiateBookIssue = () => {
-      console.log("Livro retirado pelo aluno!")
+    getStudentDetails = studentId => {
+      studentId = studentId.trim();
+      db.collection("students")
+        .where("student_id","==",studentId)
+        .get()
+        .then(snapshot => {
+          snapshot.docs.map(doc => {
+            this.setState({
+              studentName: doc.data().student_name
+            })
+          })
+        })
     }
 
-    initiateBookReturn = () => {
-      console.log("Seu livro foi devolvido à biblioteca!")
+    checkBookAvailability = async bookId => {
+      const bookRef = await db.collection("books")
+                              .where("book_id", "==", bookId)
+                              .get();
+      var transactionType = "";
+      if(bookRef.docs.length == 0){
+        this.setState({bookId: "", studentId: ""})
+        transactionType = false;
+      } else {
+        bookRef.docs.map(doc=>{
+          transactionType = doc.data().is_book_available ?
+                                      "issue" : "return";
+        })
+      }
+      return transactionType;
     }
 
     render(){
@@ -82,7 +234,7 @@ export default class TransactionScreen extends Component{
             )
         }
         return (
-            <View style={styles.container}>
+            <KeyboardAvoidingView behavior="padding" style={styles.container}>
                 <ImageBackground source={bgImage} style={styles.bgImage}>
                     <View style={styles.upperContainer}>
                         <Image source={appIcon} style={styles.appIcon}/>
@@ -95,6 +247,7 @@ export default class TransactionScreen extends Component{
                       placeholder={"Id livro"}
                       placeholderTextColor={"#FFFFFF"}
                       value={bookId}
+                      onChangeText={text=> this.setState({bookId: text})}
                       />
                     <TouchableOpacity
                       style={styles.scanbutton}
@@ -109,6 +262,7 @@ export default class TransactionScreen extends Component{
                       placeholder={"Id aluno"}
                       placeholderTextColor={"#FFFFFF"}
                       value={studentId}
+                      onChangeText={text=> this.setState({studentId: text})}
                       />
                     <TouchableOpacity
                       style={styles.scanbutton}
@@ -123,7 +277,7 @@ export default class TransactionScreen extends Component{
                 </TouchableOpacity>
               </View>
               </ImageBackground>
-            </View>
+            </KeyboardAvoidingView>
           );
     }
 }
